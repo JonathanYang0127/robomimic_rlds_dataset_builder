@@ -168,6 +168,21 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
                     'episode_index': tfds.features.Text(
                         doc='Path to the original data file.'
                     ),
+                    'env_metadata': tfds.features.FeaturesDict({ 
+                        'env_name': tfds.features.Text(
+                            doc='Name of the enviroment'
+                        ),
+                        'env_version': tfds.features.Text(
+                            doc='Version of the environment'
+                        ),
+                        'type': tfds.features.Scalar(
+                            dtype=np.int32,
+                            doc='Env version'
+                        ),
+                        'env_kwargs': tfds.features.Text(
+                            doc='String of rest of the environment kwargs'
+                        ),
+                    }),
                 }),
             }))
 
@@ -189,7 +204,7 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
 
         def _parse_example(trainset_index):
             data = trainset[trainset_index]
-     
+             
             # assemble episode --> here we're assuming demos so we set reward to 1 at the end
             episode = []
             for i in range(len(data['actions'])):
@@ -218,22 +233,37 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
                     'language_instruction': language_instruction,
                     'language_embedding': language_embedding,
                 })
+            
             # create output data sample
             sample = {
                 'steps': episode,
                 'episode_metadata': {
-                    'episode_index': str(trainset_index)
+                    'episode_index': str(trainset_index),
+                    'env_metadata': {
+                        'env_name': env_metadata['env_name'],
+                        'env_version': env_metadata['env_version'],
+                        'type': env_metadata['type'],
+                        'env_kwargs': str(env_metadata['env_kwargs'])
+                    }
                 }
             }
             # if you want to skip an example for whatever reason, simply return None
             return str(trainset_index), sample
 
+
+        #Load metadata
+        eval_dataset_cfg = self.config.train.data[0]
+        dataset_path = os.path.expanduser(eval_dataset_cfg["path"])
+        ds_format = self.config.train.data_format
+        print(ds_format)
+        env_metadata = FileUtils.get_env_metadata_from_dataset(
+            dataset_path=dataset_path, ds_format=ds_format)
         #Load config
         trainset, validset = TrainUtils.load_data_for_training(
             self.config, obs_keys=self.config.all_obs_keys)  
 
         # for smallish datasets, use single-thread parsing
-        for i in range(len(trainset)):
+        for i in range(10): #len(trainset)
             yield _parse_example(i)
 
         # for large datasets use beam to parallelize data parsing (this will have initialization overhead)
