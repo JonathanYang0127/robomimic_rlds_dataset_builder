@@ -4,6 +4,7 @@ import glob
 import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
+from tensorflow_datasets.core import constants
 import tensorflow_hub as hub
 import os
 import cv2
@@ -99,11 +100,32 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
         feature_meta['use_images'] = ObsUtils.has_modality("rgb", all_obs_keys)
 
         return feature_meta
+    
+    def _get_env_metadata(self):
+        eval_dataset_cfg = self.config.train.data[0]
+        dataset_path = os.path.expanduser(eval_dataset_cfg["path"])
+        ds_format = self.config.train.data_format
+        env_metadata = FileUtils.get_env_metadata_from_dataset(
+            dataset_path=dataset_path, ds_format=ds_format)
+        return env_metadata
 
     def _info(self) -> tfds.core.DatasetInfo:
         """Dataset metadata (homepage, citation,...)."""
         if 'feature_metadata' not in dir(self):
             self._get_feature_metadata()
+        env_metadata = self._get_env_metadata()
+        metadata = tfds.core.MetadataDict()
+        metadata.update({
+            'env_metadata':env_metadata
+        })
+        #if not os.path.exists(self.data_dir):
+        #    os.makedirs(self.data_dir)
+        #metadata_path = os.path.join(self.data_dir, constants.METADATA_FILENAME)
+        #if not os.path.isfile(metadata_path):
+        #    print(metadata_path)
+        #    os.mknod(metadata_path)
+        #metadata.save_metadata(self.data_dir)
+
         
         obs_features = dict()
         for obs_key in self.feature_metadata['all_obs_keys']:
@@ -125,7 +147,9 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
                 shape=tuple(self.feature_metadata['all_shapes'][action_key]),
                 dtype=self.feature_metadata['all_dtypes'][action_key],
             )
-        return self.dataset_info_from_configs(
+        #return self.dataset_info_from_configs(
+        return tfds.core.DatasetInfo(
+            builder=self,
             features=tfds.features.FeaturesDict({
             'steps': tfds.features.Dataset({
                     'observation': tfds.features.FeaturesDict(obs_features),
@@ -165,26 +189,12 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
                     ),
                 }),
                 'episode_metadata': tfds.features.FeaturesDict({
-                    'episode_index': tfds.features.Text(
-                        doc='Path to the original data file.'
+                    'demo_id': tfds.features.Text(
+                        doc='ID of demonstration'
                     ),
-                    'env_metadata': tfds.features.FeaturesDict({ 
-                        'env_name': tfds.features.Text(
-                            doc='Name of the enviroment'
-                        ),
-                        'env_version': tfds.features.Text(
-                            doc='Version of the environment'
-                        ),
-                        'type': tfds.features.Scalar(
-                            dtype=np.int32,
-                            doc='Env version'
-                        ),
-                        'env_kwargs': tfds.features.Text(
-                            doc='String of rest of the environment kwargs'
-                        ),
-                    }),
                 }),
-            }))
+            }),
+            metadata=metadata)
 
     def _split_generators(self, dl_manager: tfds.download.DownloadManager):
         """Define data splits."""
@@ -202,21 +212,22 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
             return np.array(image.resize(size, resample=Image.BICUBIC))
         
 
-        def _parse_example(trainset_index):
-            data = trainset[trainset_index]
+        def _parse_example(demo_id):
+            demo = f["data/{}".format(demo_id)]
              
             # assemble episode --> here we're assuming demos so we set reward to 1 at the end
             episode = []
-            for i in range(len(data['actions'])):
+            for i in range(len(demo['actions'])):
                 observation_dict = {}
                 action_dict = {}
                 for obs_key in self.feature_metadata['all_obs_keys']:
-                    nested_key = obs_key.split('/')[-1]
-                    observation_dict[nested_key] = data['obs'][nested_key][i]
+                    nested_keys = obs_key.split('/')
+                    observation_dict[nested_keys[1]] = demo[nested_keys[0]][nested_keys[1]][i]
                 for action_key in self.feature_metadata['action_keys']:
-                    nested_key = action_key.split('/')[-1]
-                    action_dict[nested_key] = data[action_key][i]
-                action = data['actions'][i]
+                    nested_keys = action_key.split('/')
+                    action_dict[nested_keys[1]] = demo[nested_keys[0]][nested_keys[1]][i]
+                action = np.concatenate([action_dict[key.split('/')[-1]] 
+                        for key in self.feature_metadata['action_keys']], axis=0)
                 language_instruction = 'Execute a task.'
 
                 # compute Kona language embedding
@@ -226,10 +237,10 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
                     'action_dict': action_dict,
                     'action': action,
                     'discount': 1.0,
-                    'reward': float(i == (len(data) - 1)),
+                    'reward': float(i == (len(demo) - 1)),
                     'is_first': i == 0,
-                    'is_last': i == (len(data) - 1),
-                    'is_terminal': i == (len(data) - 1),
+                    'is_last': i == (len(demo) - 1),
+                    'is_terminal': i == (len(demo) - 1),
                     'language_instruction': language_instruction,
                     'language_embedding': language_embedding,
                 })
@@ -238,38 +249,30 @@ class RobomimicDataset(tfds.core.GeneratorBasedBuilder):
             sample = {
                 'steps': episode,
                 'episode_metadata': {
-                    'episode_index': str(trainset_index),
-                    'env_metadata': {
-                        'env_name': env_metadata['env_name'],
-                        'env_version': env_metadata['env_version'],
-                        'type': env_metadata['type'],
-                        'env_kwargs': str(env_metadata['env_kwargs'])
-                    }
+                    'demo_id': demo_id,
                 }
             }
             # if you want to skip an example for whatever reason, simply return None
-            return str(trainset_index), sample
+            return demo_id, sample
 
 
         #Load metadata
         eval_dataset_cfg = self.config.train.data[0]
         dataset_path = os.path.expanduser(eval_dataset_cfg["path"])
         ds_format = self.config.train.data_format
-        print(ds_format)
-        env_metadata = FileUtils.get_env_metadata_from_dataset(
-            dataset_path=dataset_path, ds_format=ds_format)
-        #Load config
-        trainset, validset = TrainUtils.load_data_for_training(
-            self.config, obs_keys=self.config.all_obs_keys)  
+        
+        dataset_path = os.path.expanduser(dataset_path)
+        f = h5py.File(dataset_path, "r")
+        demo_ids = list(f["data"].keys())
 
         # for smallish datasets, use single-thread parsing
-        for i in range(10): #len(trainset)
-            yield _parse_example(i)
+        for demo_id in demo_ids:
+            yield _parse_example(demo_id)
+        f.close()
 
         # for large datasets use beam to parallelize data parsing (this will have initialization overhead)
         #beam = tfds.core.lazy_imports.apache_beam
         #return (
-        #         beam.Create(episode_paths)
         #         | beam.Map(_parse_example)
         #)
 
